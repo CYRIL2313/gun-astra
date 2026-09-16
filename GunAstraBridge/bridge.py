@@ -1,182 +1,99 @@
 import serial
 import time
-from pynput.mouse import Controller
+from pynput import mouse
 
-# =====================================================
+# =========================
 # SETTINGS
-# =====================================================
+# =========================
 
 PORT = "COM21"
 BAUD = 115200
 
-# Gyro sensitivity
-# We will tune these later.
-MOUSE_SENSITIVITY_X = 8.0
-MOUSE_SENSITIVITY_Y = 8.0
+MOUSE_SENSITIVITY_X = 20.0
+MOUSE_SENSITIVITY_Y = 20.0
 
-# Ignore tiny gyro noise
 GYRO_DEADZONE = 0.12
+SMOOTHING = 0.35
 
-# =====================================================
+# =========================
+# SERIAL
+# =========================
+
+ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(2)
+
+print("Gyro mouse test started")
+print("GX -> Horizontal")
+print("GZ -> Vertical")
+print("Move the gun!")
+
+# =========================
 # MOUSE
-# =====================================================
+# =========================
 
-mouse = Controller()
+mouse_controller = mouse.Controller()
 
-# =====================================================
-# GYRO PROCESSING
-# =====================================================
+filtered_x = 0.0
+filtered_y = 0.0
 
-def process_gyro(value):
-    """
-    Remove tiny movements caused by sensor noise.
-    """
 
+def apply_deadzone(value):
     if abs(value) < GYRO_DEADZONE:
         return 0.0
-
     return value
 
 
-# =====================================================
-# SERIAL PACKET
-# =====================================================
+# =========================
+# MAIN LOOP
+# =========================
 
-def parse_packet(line):
-    """
-    Expected:
-
-    DATA,GX,GY,GZ,JOY_X,JOY_Y,SCOPE,FIRE,RELOAD,RECENTER
-    """
-
-    parts = line.strip().split(",")
-
-    if len(parts) != 10:
-        return None
-
-    if parts[0] != "DATA":
-        return None
+while True:
 
     try:
+        line = ser.readline().decode(errors="ignore").strip()
+
+        if not line.startswith("DATA,"):
+            continue
+
+        parts = line.split(",")
+
+        if len(parts) < 10:
+            continue
+
+        # DATA,GX,GY,GZ,JOY_X,JOY_Y,SCOPE,FIRE,RELOAD,RECENTER
         gx = float(parts[1])
-        gy = float(parts[2])
         gz = float(parts[3])
 
-        joy_x = int(parts[4])
-        joy_y = int(parts[5])
+        # Deadzone
+        gx = apply_deadzone(gx)
+        gz = apply_deadzone(gz)
 
-        scope = int(parts[6])
-        fire = int(parts[7])
-        reload_button = int(parts[8])
-        recenter = int(parts[9])
-
-        return (
-            gx,
-            gy,
-            gz,
-            joy_x,
-            joy_y,
-            scope,
-            fire,
-            reload_button,
-            recenter,
+        # Smoothing
+        filtered_x = (
+            filtered_x * (1 - SMOOTHING)
+            + gx * SMOOTHING
         )
 
-    except ValueError:
-        return None
+        filtered_y = (
+            filtered_y * (1 - SMOOTHING)
+            + gz * SMOOTHING
+        )
 
+        # Horizontal:
+        # Right movement previously moved cursor LEFT,
+        # so invert GX.
+        mouse_x = int(-filtered_x * MOUSE_SENSITIVITY_X)
 
-# =====================================================
-# CONNECT
-# =====================================================
-
-print("========================================")
-print("        GUN ASTRA GYRO TEST")
-print("========================================")
-print(f"Connecting to {PORT}...")
-
-try:
-    ser = serial.Serial(PORT, BAUD, timeout=1)
-
-except Exception as e:
-    print()
-    print("ERROR: Could not connect to ESP32.")
-    print(e)
-    print()
-    input("Press Enter to exit...")
-    raise SystemExit
-
-print("Connected!")
-print()
-print("GYRO CONTROL ACTIVE")
-print()
-print("Move the gun gently.")
-print("The Windows mouse cursor should move.")
-print()
-print("Press Ctrl+C to stop.")
-print("----------------------------------------")
-
-
-# =====================================================
-# MAIN LOOP
-# =====================================================
-
-try:
-
-    while True:
-
-        line = ser.readline().decode("utf-8", errors="ignore").strip()
-
-        if not line:
-            continue
-
-        data = parse_packet(line)
-
-        if data is None:
-            continue
-
-        (
-            gx,
-            gy,
-            gz,
-            joy_x,
-            joy_y,
-            scope,
-            fire,
-            reload_button,
-            recenter,
-        ) = data
-
-        # ---------------------------------------------
-        # Process gyro
-        # ---------------------------------------------
-
-        gx = process_gyro(gx)
-        gy = process_gyro(gy)
-
-        # ---------------------------------------------
-        # Convert gyro to mouse movement
-        # ---------------------------------------------
-
-        mouse_x = int(gx * MOUSE_SENSITIVITY_X)
-        mouse_y = int(gy * MOUSE_SENSITIVITY_Y)
-
-        # ---------------------------------------------
-        # Move Windows cursor
-        # ---------------------------------------------
+        # Vertical:
+        # Now using GZ instead of GY.
+        mouse_y = int(filtered_y * MOUSE_SENSITIVITY_Y)
 
         if mouse_x != 0 or mouse_y != 0:
-            mouse.move(mouse_x, mouse_y)
+            mouse_controller.move(mouse_x, mouse_y)
 
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        break
 
-except KeyboardInterrupt:
-
-    print()
-    print("Stopping gun controller...")
-
-finally:
-
-    ser.close()
-
-    print("ESP32 disconnected.")
-    print("Done.")
+    except Exception as e:
+        print("Error:", e)
